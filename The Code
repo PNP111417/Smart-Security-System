@@ -1,0 +1,144 @@
+// --- PIN DEFINITIONS ---
+const int LATCH_PIN = 8; // ST_CP (Pin 12 on 74HC595)
+const int CLOCK_PIN = 13; // SH_CP (Pin 11 on 74HC595)
+const int DATA_PIN  = 11; // DS    (Pin 14 on 74HC595)
+
+const int BUTTON_PIN = 2; // Momentary Pushbutton (INPUT_PULLUP)
+const int LDR_PIN    = A0; // Light-Dependent Resistor Voltage Divider
+const int BUZZER_PIN = 5;  // Active/Passive Piezo Buzzer
+
+// --- SYSTEM STATES ---
+enum SystemState {
+  DISARMED,
+  ARMED,
+  TRIGGERED
+};
+
+SystemState currentState = DISARMED;
+
+// --- SENSOR & THRESHOLD CONFIGURATION ---
+const int LDR_THRESHOLD = 900; // Set lower than your ambient reading of 900
+
+// --- NON-BLOCKING TIMING TRACKING ---
+unsigned long previousBuzzerMillis = 0;
+const long buzzerInterval = 150; // Audio alarm pulse speed (ms)
+bool buzzerState = false;
+
+unsigned long previousLedMillis = 0;
+const long ledInterval = 200;    // LED chase pattern speed (ms)
+byte ledPattern = 0x01;          // Bit pattern for shift register
+
+// --- DEBOUNCE TRACKING ---
+int lastButtonState = HIGH;
+unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 50;
+
+// --- FUNCTION PROTOTYPES ---
+void updateShiftRegister(byte pattern);
+void handleButtonInput();
+void processStateLogic();
+
+void setup() {
+  pinMode(LATCH_PIN, OUTPUT);
+  pinMode(CLOCK_PIN, OUTPUT);
+  pinMode(DATA_PIN, OUTPUT);
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  Serial.begin(9600);
+  updateShiftRegister(0x00); // Initialize all LEDs off
+}
+
+void loop() {
+  handleButtonInput();
+  processStateLogic();
+}
+
+// --- SHIFT REGISTER HARDWARE OUTPUT ---
+void updateShiftRegister(byte pattern) {
+  digitalWrite(LATCH_PIN, LOW);
+  shiftOut(DATA_PIN, CLOCK_PIN, MSBFIRST, pattern);
+  digitalWrite(LATCH_PIN, HIGH);
+}
+
+// --- NON-BLOCKING DEBOUNCED INPUT SAMPLING ---
+void handleButtonInput() {
+  int reading = digitalRead(BUTTON_PIN);
+
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    static int buttonState = HIGH;
+    if (reading != buttonState) {
+      buttonState = reading;
+      if (buttonState == LOW) { // Button Pressed
+        if (currentState == DISARMED) {
+          currentState = ARMED;
+          Serial.println(F("SYSTEM STATE: ARMED"));
+        } else {
+          currentState = DISARMED;
+          noTone(BUZZER_PIN);
+          digitalWrite(BUZZER_PIN, LOW);
+          updateShiftRegister(0x00);
+          Serial.println(F("SYSTEM STATE: DISARMED"));
+        }
+      }
+    }
+  }
+  lastButtonState = reading;
+}
+
+// --- FINITE STATE MACHINE LOGIC ---
+void processStateLogic() {
+  unsigned long currentMillis = millis();
+
+  switch (currentState) {
+    case DISARMED:
+      updateShiftRegister(0x00);
+      digitalWrite(BUZZER_PIN, LOW);
+      noTone(BUZZER_PIN);
+      break;
+
+    case ARMED: {
+      // Solid heartbeat LED indicator (e.g., LED 0 active)
+      updateShiftRegister(0x01);
+      
+      int ldrValue = analogRead(LDR_PIN);
+
+      // 1. PRINT THE RAW VALUE TO SERIAL MONITOR (FOR DEBUGGING)
+      Serial.print(F("LDR Value: "));
+      Serial.println(ldrValue);
+
+      // 2. CHECK IF THE TRIPWIRE IS BROKEN
+      if (ldrValue < LDR_THRESHOLD) { // Optical tripwire broken
+        currentState = TRIGGERED;
+        Serial.println(F("SYSTEM STATE: TRIGGERED (TRIPWIRE BREACH)"));
+      }
+      break;
+    }
+
+    case TRIGGERED:
+      // Non-blocking LED Chaser Pattern
+      if (currentMillis - previousLedMillis >= ledInterval) {
+        previousLedMillis = currentMillis;
+        ledPattern = (ledPattern << 1);
+        if (ledPattern == 0x00) ledPattern = 0x01;
+        updateShiftRegister(ledPattern);
+      }
+
+      // Non-blocking Audible Alarm Pulsing
+      if (currentMillis - previousBuzzerMillis >= buzzerInterval) {
+        previousBuzzerMillis = currentMillis;
+        buzzerState = !buzzerState;
+        if (buzzerState) {
+          tone(BUZZER_PIN, 1200);
+        } else {
+          noTone(BUZZER_PIN);
+        }
+      }
+      break;
+  }
+}
